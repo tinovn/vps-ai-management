@@ -1,0 +1,8 @@
+# Managed by vps-ai-management — do not edit.
+# Moi app co 1 site file trong /etc/vps-ai/caddy/sites/. Bien {$...} duoc
+# /usr/local/sbin/vps-ai-caddy-env sinh tu .env cua tung app truoc moi start/reload.
+{
+    email {$ACME_EMAIL}
+}
+
+import /etc/vps-ai/caddy/sites/*.caddy

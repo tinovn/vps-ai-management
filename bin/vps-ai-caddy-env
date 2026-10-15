@@ -1,0 +1,42 @@
+#!/bin/bash
+# =============================================================================
+# vps-ai-caddy-env — sinh /run/vps-ai/caddy.env cho caddy.service
+#
+# Hermes va OpenClaw deu dung ten bien DOMAIN / CADDY_TLS trong .env rieng
+# (management API cua chung sua truc tiep cac file nay). Script nay doc tung
+# .env va them prefix de 1 Caddy phuc vu duoc ca hai:
+#   /opt/hermes/.env   DOMAIN, CADDY_TLS, HERMES_AUTH_TOKEN -> HERMES_DOMAIN, HERMES_CADDY_TLS, HERMES_AUTH_TOKEN
+#   /opt/openclaw/.env DOMAIN, CADDY_TLS                    -> OPENCLAW_DOMAIN, OPENCLAW_CADDY_TLS
+#   /opt/vps-ai/.env   ACME_EMAIL
+# Chay boi systemd (ExecStartPre/ExecReload) voi quyen root.
+# =============================================================================
+set -euo pipefail
+
+OUT="/run/vps-ai/caddy.env"
+
+get() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  awk -F= -v k="$key" '$1 == k { sub("^[^=]*=", ""); print; exit }' "$file"
+}
+
+base_domain="$(get /opt/vps-ai/.env BASE_DOMAIN)"
+email="$(get /opt/vps-ai/.env ACME_EMAIL)"
+[[ -n "$email" ]] || email="admin@${base_domain:-localhost}"
+
+mkdir -p "$(dirname "$OUT")"
+tmp="$(mktemp "$(dirname "$OUT")/.caddy.env.XXXXXX")"
+{
+  echo "ACME_EMAIL=${email}"
+  if [[ -f /opt/hermes/.env ]]; then
+    echo "HERMES_DOMAIN=$(get /opt/hermes/.env DOMAIN)"
+    echo "HERMES_CADDY_TLS=$(get /opt/hermes/.env CADDY_TLS)"
+    echo "HERMES_AUTH_TOKEN=$(get /opt/hermes/.env HERMES_AUTH_TOKEN)"
+  fi
+  if [[ -f /opt/openclaw/.env ]]; then
+    echo "OPENCLAW_DOMAIN=$(get /opt/openclaw/.env DOMAIN)"
+    echo "OPENCLAW_CADDY_TLS=$(get /opt/openclaw/.env CADDY_TLS)"
+  fi
+} > "$tmp"
+chmod 600 "$tmp"
+mv -f "$tmp" "$OUT"

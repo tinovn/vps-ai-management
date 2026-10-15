@@ -1,0 +1,94 @@
+diff --git a/src/n8n/n8n.service.ts b/src/n8n/n8n.service.ts
+index a88ed83..879b9ae 100644
+--- a/src/n8n/n8n.service.ts
++++ b/src/n8n/n8n.service.ts
+@@ -422,7 +422,7 @@ services:
+     image: dockerhub.tino.org/library/nocodb/nocodb:latest
+     restart: always
+     ports:
+-      - "8080:8080"
++      - "127.0.0.1:8080:8080"
+     environment:
+       NC_DB_TYPE: "pg"
+       NC_DATABASE: \${POSTGRES_DB}
+@@ -865,7 +865,61 @@ REDIS_PASSWORD=${randomBytes(24).toString('hex')}`;
+     }
+   }
+ 
++  // PROXY_MODE=caddy: VPS dung chung 1 Caddy voi cac app khac (vps-ai-management).
++  // Agent chi ghi site file vao CADDY_SITES_DIR va reload Caddy; Caddy tu cap +
++  // gia han Let's Encrypt (tu retry khi DNS chua tro). Mac dinh: nginx + certbot.
++  private isCaddyMode(): boolean {
++    return (process.env.PROXY_MODE || 'nginx').toLowerCase() === 'caddy';
++  }
++
++  private caddySitePath(): string {
++    const dir = process.env.CADDY_SITES_DIR || '/etc/vps-ai/caddy/sites';
++    return path.join(dir, 'n8n.caddy');
++  }
++
++  private createCaddySite(domain: string, email: string): string {
++    return `# Managed by n8n-agent (PROXY_MODE=caddy) — do not edit, rewritten on install/change-domain
++${domain} {
++    tls ${email}
++
++    request_body {
++        max_size 100MB
++    }
++
++    handle_path /nocodb/* {
++        reverse_proxy 127.0.0.1:8080
++    }
++
++    handle /mcp/* {
++        reverse_proxy 127.0.0.1:5678 {
++            flush_interval -1
++            transport http {
++                read_timeout 1h
++                write_timeout 1h
++            }
++        }
++    }
++
++    handle {
++        reverse_proxy 127.0.0.1:5678 {
++            flush_interval -1
++        }
++    }
++}
++`;
++  }
++
++  private async setupCaddy(domain: string, email: string) {
++    const sitePath = this.caddySitePath();
++    await fs.mkdir(path.dirname(sitePath), { recursive: true });
++    await fs.writeFile(sitePath, this.createCaddySite(domain, email));
++    this.logger.log(`Caddy site file written at ${sitePath}`);
++    await this.shellService.execute('systemctl reload caddy || systemctl restart caddy');
++    this.logger.log('Caddy reloaded; certificate is provisioned automatically.');
++  }
++
+   private async setupNginxAndSSL(domain: string, email: string) {
++    if (this.isCaddyMode()) return this.setupCaddy(domain, email);
+     // 1. Cau hinh nginx phuc vu HTTP (port 80) truoc — n8n truy cap duoc ngay
+     //    ke ca khi SSL chua cap xong.
+     const nginxConfigContent = this.createNginxConfig(domain);
+@@ -923,6 +977,18 @@ REDIS_PASSWORD=${randomBytes(24).toString('hex')}`;
+   }
+ 
+   private async cleanupNginxAndSSL(domain: string) {
++    if (this.isCaddyMode()) {
++      try {
++        await fs.unlink(this.caddySitePath());
++        await this.shellService.execute('systemctl reload caddy || systemctl restart caddy');
++        this.logger.log(`Removed Caddy site for ${domain}.`);
++      } catch (error) {
++        if (error.code !== 'ENOENT') {
++          this.logger.error(`Could not remove Caddy site for ${domain}: ${error.message}`);
++        }
++      }
++      return;
++    }
+     const nginxConfigPath = `/etc/nginx/sites-available/${domain}`;
+     const nginxSymlinkPath = `/etc/nginx/sites-enabled/${domain}`;
+     try {

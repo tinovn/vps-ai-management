@@ -1,0 +1,161 @@
+#!/bin/bash
+# =============================================================================
+# vps-ai — xem thong tin / trang thai cac app do vps-ai-management cai
+#
+#   vps-ai info                 URL, token, API key cua tung app
+#   vps-ai status               trang thai systemd/docker
+#   vps-ai restart <app|all>    hermes | n8n | openclaw | caddy | all
+#   vps-ai logs <app>           journalctl -f cua app
+#   vps-ai reload-caddy         sinh lai env + validate + restart Caddy
+#   vps-ai add <app...>         cai them app (chay lai install.sh voi cau hinh hien tai)
+# =============================================================================
+set -uo pipefail
+
+ENV_FILE="/opt/vps-ai/.env"
+SRC_DIR="/opt/vps-ai/src"
+
+get() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  awk -F= -v k="$key" '$1 == k { sub("^[^=]*=", ""); print; exit }' "$file"
+}
+
+apps() { get "$ENV_FILE" INSTALLED_APPS | tr ',' ' '; }
+has_app() { [[ " $(apps) " == *" $1 "* ]]; }
+
+svc() {
+  local s
+  s="$(systemctl is-active "$1" 2>/dev/null)"
+  printf "    %-22s %s\n" "$1" "${s:-unknown}"
+}
+
+cmd_info() {
+  local ip key
+  ip="$(get "$ENV_FILE" SERVER_IP)"
+  key="$(get "$ENV_FILE" MGMT_API_KEY)"
+  echo "============================================================"
+  echo "  vps-ai-management $(get "$ENV_FILE" VPS_AI_VERSION)"
+  echo "============================================================"
+  echo "  Ten mien goc : $(get "$ENV_FILE" BASE_DOMAIN)"
+  echo "  Server IP    : ${ip}"
+  echo "  MGMT API key : ${key}   (dung chung cho moi management API)"
+  echo ""
+  if has_app hermes; then
+    local d tls
+    d="$(get /opt/hermes/.env DOMAIN)"
+    tls="$(get /opt/hermes/.env CADDY_TLS)"
+    echo "  [Hermes Agent]"
+    echo "    Dashboard   : https://${d}/?token=$(get /opt/hermes/.env HERMES_AUTH_TOKEN)"
+    echo "    Mgmt API    : http://${ip}:9997   (Authorization: Bearer <MGMT API key>)"
+    echo "    SSL         : $([[ -z "$tls" ]] && echo "Let's Encrypt" || echo "tu ky (DNS chua tro khi cai)")"
+    echo ""
+  fi
+  if has_app openclaw; then
+    local d tls
+    d="$(get /opt/openclaw/.env DOMAIN)"
+    tls="$(get /opt/openclaw/.env CADDY_TLS)"
+    echo "  [OpenClaw]"
+    echo "    Gateway     : https://${d#http://}"
+    echo "    Pair        : http://${ip}:9998/pair?token=$(get /opt/openclaw/.env OPENCLAW_GATEWAY_TOKEN)"
+    echo "    Mgmt API    : http://${ip}:9998   (Authorization: Bearer <MGMT API key>)"
+    echo "    SSL         : $([[ -z "$tls" ]] && echo "Let's Encrypt" || echo "tu ky (DNS chua tro khi cai)")"
+    echo ""
+  fi
+  if has_app n8n; then
+    local d
+    d="$(get /opt/n8n/.env N8N_HOST)"
+    echo "  [n8n]"
+    echo "    n8n         : https://${d:-<dang cai>}"
+    echo "    NocoDB      : https://${d:-<dang cai>}/nocodb/"
+    echo "    Agent API   : http://${ip}:7071   (header tng-api-key: <MGMT API key>, IP whitelist)"
+    echo ""
+  fi
+  echo "  DNS: tro A record cua moi ten mien tren ve ${ip} (hoac wildcard *.$(get "$ENV_FILE" BASE_DOMAIN))"
+  echo "  Log cai dat: /var/log/vps-ai-install.log"
+  echo "============================================================"
+}
+
+cmd_status() {
+  echo "  [chung]"
+  svc caddy
+  svc fail2ban
+  if has_app hermes; then
+    echo "  [hermes]"
+    for s in hermes-mgmt hermes-gateway hermes-dashboard hermes-rag; do
+      systemctl list-unit-files "${s}.service" &>/dev/null && svc "$s"
+    done
+  fi
+  if has_app openclaw; then
+    echo "  [openclaw]"
+    svc openclaw
+    svc openclaw-mgmt
+  fi
+  if has_app n8n; then
+    echo "  [n8n]"
+    svc n8n-agent
+    svc docker
+    if [[ -f /opt/n8n/docker-compose.yml ]]; then
+      (cd /opt/n8n && docker compose ps --format '    {{.Service}}  {{.State}}  {{.Status}}' 2>/dev/null)
+    fi
+  fi
+}
+
+units_of() {
+  case "$1" in
+    hermes)   echo "hermes-mgmt hermes-gateway hermes-dashboard $(systemctl list-unit-files hermes-rag.service &>/dev/null && echo hermes-rag)" ;;
+    openclaw) echo "openclaw openclaw-mgmt" ;;
+    n8n)      echo "n8n-agent" ;;
+    caddy)    echo "caddy" ;;
+    *)        echo "" ;;
+  esac
+}
+
+cmd_restart() {
+  local target="${1:-}" a
+  [[ -n "$target" ]] || { echo "Usage: vps-ai restart <hermes|n8n|openclaw|caddy|all>"; exit 1; }
+  if [[ "$target" == "all" ]]; then
+    for a in $(apps); do cmd_restart "$a"; done
+    cmd_restart caddy
+    return
+  fi
+  local units
+  units="$(units_of "$target")"
+  [[ -n "$units" ]] || { echo "App khong hop le: $target"; exit 1; }
+  # shellcheck disable=SC2086
+  systemctl restart $units && echo "Da restart: $units"
+  if [[ "$target" == "n8n" && -f /opt/n8n/docker-compose.yml ]]; then
+    (cd /opt/n8n && docker compose restart) && echo "Da restart docker compose /opt/n8n"
+  fi
+}
+
+cmd_logs() {
+  local units u args=()
+  units="$(units_of "${1:-}")"
+  [[ -n "$units" ]] || { echo "Usage: vps-ai logs <hermes|n8n|openclaw|caddy>"; exit 1; }
+  for u in $units; do args+=(-u "$u"); done
+  exec journalctl "${args[@]}" -f -n 100
+}
+
+cmd_reload_caddy() {
+  /usr/local/sbin/vps-ai-caddy-env
+  ( set -a; . /run/vps-ai/caddy.env; caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ) || exit 1
+  systemctl restart caddy && echo "Caddy da restart"
+}
+
+cmd_add() {
+  [[ $# -gt 0 ]] || { echo "Usage: vps-ai add <hermes|n8n|openclaw>..."; exit 1; }
+  local flags=() a
+  for a in "$@"; do flags+=("--${a}"); done
+  exec bash "${SRC_DIR}/install.sh" --domain "$(get "$ENV_FILE" BASE_DOMAIN)" "${flags[@]}"
+}
+
+case "${1:-info}" in
+  info)          cmd_info ;;
+  status)        cmd_status ;;
+  restart)       shift; cmd_restart "$@" ;;
+  logs)          shift; cmd_logs "$@" ;;
+  reload-caddy)  cmd_reload_caddy ;;
+  add)           shift; cmd_add "$@" ;;
+  -h|--help|help) sed -n '3,10p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)             echo "Lenh khong ro: $1 (xem: vps-ai help)"; exit 1 ;;
+esac

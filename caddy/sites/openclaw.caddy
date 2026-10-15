@@ -1,0 +1,30 @@
+# OpenClaw gateway — managed by vps-ai-management.
+# Domain / TLS doc tu /opt/openclaw/.env (DOMAIN, CADDY_TLS).
+{$OPENCLAW_DOMAIN} {
+    {$OPENCLAW_CADDY_TLS}
+
+    # Trang login + auth API -> OpenClaw Management API
+    handle /login {
+        reverse_proxy 127.0.0.1:9998
+    }
+    handle /api/auth/* {
+        reverse_proxy 127.0.0.1:9998
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:18789 {
+            header_up Host "localhost:18789"
+            header_up -X-Forwarded-For
+            header_up -X-Forwarded-Host
+            header_up -X-Forwarded-Proto
+            header_up -X-Real-IP
+        }
+    }
+
+    log {
+        output file /var/log/caddy/openclaw-access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+    }
+}

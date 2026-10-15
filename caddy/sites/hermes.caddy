@@ -1,0 +1,47 @@
+# Hermes Agent dashboard — managed by vps-ai-management.
+# Domain / TLS / token doc tu /opt/hermes/.env (DOMAIN, CADDY_TLS, HERMES_AUTH_TOKEN).
+{$HERMES_DOMAIN} {
+    {$HERMES_CADDY_TLS}
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Lan dau: https://<domain>/?token=$HERMES_AUTH_TOKEN -> set cookie 30 ngay, 302 ve /
+    @hermes_auth_query {
+        query token={$HERMES_AUTH_TOKEN}
+    }
+    handle @hermes_auth_query {
+        header Set-Cookie "hermes_auth={$HERMES_AUTH_TOKEN}; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax"
+        redir https://{host}/ 302
+    }
+
+    @hermes_auth_cookie {
+        header Cookie *hermes_auth={$HERMES_AUTH_TOKEN}*
+    }
+    handle @hermes_auth_cookie {
+        reverse_proxy 127.0.0.1:9119 {
+            header_up Host "localhost:9119"
+            header_up Origin "http://127.0.0.1:9119"
+            flush_interval -1
+            transport http {
+                read_timeout 24h
+            }
+        }
+    }
+
+    handle {
+        respond "Forbidden. Append ?token=<HERMES_AUTH_TOKEN> to authenticate." 403
+    }
+
+    log {
+        output file /var/log/caddy/hermes-access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+    }
+}
