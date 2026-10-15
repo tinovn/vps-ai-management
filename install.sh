@@ -158,6 +158,7 @@ run_module() {
   if bash "${SELF_DIR}/lib/run-module.sh" "$name"; then
     log "${name}: cai dat xong"
     mark_installed "$name"
+    unmark_disabled "$name"
   else
     log "LOI: ${name} cai dat that bai — xem log phia tren"
     FAILED_APPS+=("$name")
@@ -175,6 +176,7 @@ $WANT_N8N      && run_module n8n
 step "5. Hoan tat"
 reload_caddy || FAILED_APPS+=(caddy)
 install_cli
+install_mgmt_api
 cleanup_apt
 if [[ "${VPS_AI_LOG_REDIRECTED:-0}" == "1" ]]; then /usr/local/bin/vps-ai info; else /usr/local/bin/vps-ai info | tee -a "$LOG_FILE"; fi
 

@@ -15,6 +15,7 @@ readonly CADDY_SITES_DIR="/etc/vps-ai/caddy/sites"
 readonly HERMES_MGMT_PORT=9997
 readonly OPENCLAW_MGMT_PORT=9998
 readonly N8N_AGENT_PORT=7071
+readonly VPS_AI_MGMT_PORT=9990
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -214,6 +215,14 @@ mark_installed() {
   upsert_env "$VPS_AI_ENV" INSTALLED_APPS "$apps"
 }
 
+# Cai (lai) 1 app = bat app do -> bo khoi DISABLED_APPS
+unmark_disabled() {
+  local app="$1" list
+  list="$(read_env_value "$VPS_AI_ENV" DISABLED_APPS | tr ',' '\n' | grep -vx "$app" | xargs | tr ' ' ',' || true)"
+  [[ -n "$(read_env_value "$VPS_AI_ENV" DISABLED_APPS)" ]] && upsert_env "$VPS_AI_ENV" DISABLED_APPS "$list"
+  rm -f "/etc/vps-ai/caddy/sites-disabled/${app}.caddy"
+}
+
 total_app_count() {
   local all
   all="$(installed_apps)"
@@ -351,6 +360,39 @@ install_cli() {
     rm -rf "${VPS_AI_DIR}/src"
     mkdir -p "${VPS_AI_DIR}/src"
     cp -a "${SELF_DIR}/." "${VPS_AI_DIR}/src/"
+  fi
+}
+
+# Management API chung (:9990) — bat/tat app, trang thai, tai nguyen. Goi CLI vps-ai.
+install_mgmt_api() {
+  mkdir -p "${VPS_AI_DIR}/mgmt"
+  install -m 0644 "${SELF_DIR}/mgmt/server.js" "${VPS_AI_DIR}/mgmt/server.js"
+  cat > /etc/systemd/system/vps-ai-mgmt.service <<EOF
+[Unit]
+Description=vps-ai-management API (enable/disable apps)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=$(command -v node) ${VPS_AI_DIR}/mgmt/server.js
+Environment=VPS_AI_MGMT_PORT=${VPS_AI_MGMT_PORT}
+Restart=always
+RestartSec=5
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable vps-ai-mgmt >/dev/null 2>&1
+  systemctl restart vps-ai-mgmt
+  ufw_allow "${VPS_AI_MGMT_PORT}/tcp" vps-ai-mgmt
+  if wait_http "http://127.0.0.1:${VPS_AI_MGMT_PORT}/health" 10 1; then
+    log "vps-ai-mgmt dang chay (:${VPS_AI_MGMT_PORT})"
+  else
+    log "WARN: vps-ai-mgmt chua phan hoi — journalctl -u vps-ai-mgmt"
   fi
 }
 

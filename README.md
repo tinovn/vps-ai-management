@@ -64,14 +64,45 @@ vps-ai status            # trạng thái service / container
 vps-ai restart <app|all>
 vps-ai logs <app>
 vps-ai add n8n           # cài thêm app
+vps-ai disable n8n       # tắt hẳn app không dùng (tiết kiệm RAM), dữ liệu giữ nguyên
+vps-ai enable n8n        # bật lại
+vps-ai apps              # app nào đang enabled / disabled
 vps-ai reload-caddy
 ```
+
+### API bật/tắt app cho panel (`:9990`)
+
+Header: `Authorization: Bearer <MGMT_API_KEY>` (key dùng chung, `--mgmt-key` lúc cài).
+
+| Method | Path | Mô tả |
+|---|---|---|
+| GET | `/health` | Không cần auth |
+| GET | `/api/apps` | Danh sách app: `enabled`, `status` (`running` / `partial` / `stopped`), `memoryMb`, `domain`, từng service / container |
+| GET | `/api/apps/{app}` | Chi tiết 1 app (`hermes` / `n8n` / `openclaw`) |
+| POST | `/api/apps/{app}/disable` | Tắt app |
+| POST | `/api/apps/{app}/enable` | Bật lại app |
+| GET | `/api/system` | RAM / swap / disk / load của VPS |
+
+Disable một app:
+- `systemctl disable --now` toàn bộ unit của app, kể cả management API riêng của nó → **không tự chạy lại sau reboot**
+- n8n: `docker compose down` (xoá container, **giữ volume** — workflow, database, NocoDB còn nguyên)
+- Gỡ site của app khỏi Caddy (`sites-disabled/`), các app khác không bị ảnh hưởng
+
+Enable thì làm ngược lại (n8n mất ~15 giây để dựng lại container). Mã lỗi: `400` app không hợp lệ, `404` app chưa cài, `409` đang có thao tác bật/tắt khác, `500` lỗi khi chạy (chi tiết trong `error`).
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" http://<IP>:9990/api/apps/n8n/disable
+# {"ok":true,"output":"...","data":{"app":"n8n","enabled":false,"status":"stopped","memoryMb":0,...}}
+```
+
+Đo thực tế (VPS 6GB, cài cả 3 app): Hermes ~1.2GB, n8n ~1.2–2GB, OpenClaw ~0.8–1.3GB; tắt cả 3 còn ~450MB dùng.
 
 ### Cổng
 
 | Cổng | Dịch vụ | Public |
 |---|---|---|
 | 80, 443 | Caddy (dùng chung) | ✔ |
+| 9990 | vps-ai management API — bật/tắt app (`Authorization: Bearer <key>`) | ✔ |
 | 9997 | Hermes management API (`Authorization: Bearer <key>`) | ✔ |
 | 9998 | OpenClaw management API (`Authorization: Bearer <key>`) | ✔ |
 | 7071 | n8n-agent (`tng-api-key: <key>`, IP whitelist) | ✔ |
@@ -114,7 +145,8 @@ lib/caddy.sh            Caddy dùng chung + override systemd
 lib/run-module.sh       chạy từng module trong tiến trình riêng
 modules/{hermes,n8n,openclaw}.sh
 caddy/Caddyfile, caddy/sites/{hermes,openclaw}.caddy
-bin/vps-ai              CLI quản trị
+bin/vps-ai              CLI quản trị (info, status, enable/disable app...)
+mgmt/server.js          vps-ai management API :9990 (Node, không dependency)
 bin/vps-ai-caddy-env    sinh /run/vps-ai/caddy.env cho Caddy
 patches/n8n-manage-caddy.patch
 ```

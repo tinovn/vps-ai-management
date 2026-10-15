@@ -8,6 +8,10 @@
 #   vps-ai logs <app>           journalctl -f cua app
 #   vps-ai reload-caddy         sinh lai env + validate + restart Caddy
 #   vps-ai add <app...>         cai them app (chay lai install.sh voi cau hinh hien tai)
+#   vps-ai disable <app>        tat han app (stop + disable systemd, n8n: compose down,
+#                               go site Caddy) de tiet kiem RAM; du lieu giu nguyen
+#   vps-ai enable <app>         bat lai app da disable
+#   vps-ai apps                 trang thai enabled/disabled cua tung app
 # =============================================================================
 set -uo pipefail
 
@@ -22,6 +26,24 @@ get() {
 
 apps() { get "$ENV_FILE" INSTALLED_APPS | tr ',' ' '; }
 has_app() { [[ " $(apps) " == *" $1 "* ]]; }
+disabled_apps() { get "$ENV_FILE" DISABLED_APPS | tr ',' ' '; }
+is_disabled() { [[ " $(disabled_apps) " == *" $1 "* ]]; }
+unit_exists() { systemctl cat "$1" &>/dev/null; }
+
+SITES_DIR="/etc/vps-ai/caddy/sites"
+SITES_OFF_DIR="/etc/vps-ai/caddy/sites-disabled"
+
+# set_env_key <key> <value> — ghi de/them 1 dong trong /opt/vps-ai/.env
+set_env_key() {
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp)"
+  if grep -q "^${key}=" "$ENV_FILE"; then
+    awk -v k="$key" -v v="$value" -F= '$1 == k { print k "=" v; next } { print }' "$ENV_FILE" > "$tmp"
+  else
+    cat "$ENV_FILE" > "$tmp"; echo "${key}=${value}" >> "$tmp"
+  fi
+  cat "$tmp" > "$ENV_FILE"; rm -f "$tmp"
+}
 
 svc() {
   local s
@@ -39,12 +61,13 @@ cmd_info() {
   echo "  Ten mien goc : $(get "$ENV_FILE" BASE_DOMAIN)"
   echo "  Server IP    : ${ip}"
   echo "  MGMT API key : ${key}   (dung chung cho moi management API)"
+  echo "  vps-ai API   : http://${ip}:9990   (bat/tat app: POST /api/apps/<app>/disable|enable)"
   echo ""
   if has_app hermes; then
     local d tls
     d="$(get /opt/hermes/.env DOMAIN)"
     tls="$(get /opt/hermes/.env CADDY_TLS)"
-    echo "  [Hermes Agent]"
+    echo "  [Hermes Agent]$(is_disabled hermes && echo "  — DISABLED (vps-ai enable hermes)")"
     echo "    Dashboard   : https://${d}/?token=$(get /opt/hermes/.env HERMES_AUTH_TOKEN)"
     echo "    Mgmt API    : http://${ip}:9997   (Authorization: Bearer <MGMT API key>)"
     echo "    SSL         : $([[ -z "$tls" ]] && echo "Let's Encrypt" || echo "tu ky (DNS chua tro khi cai)")"
@@ -54,7 +77,7 @@ cmd_info() {
     local d tls
     d="$(get /opt/openclaw/.env DOMAIN)"
     tls="$(get /opt/openclaw/.env CADDY_TLS)"
-    echo "  [OpenClaw]"
+    echo "  [OpenClaw]$(is_disabled openclaw && echo "  — DISABLED (vps-ai enable openclaw)")"
     echo "    Gateway     : https://${d#http://}"
     echo "    Pair        : http://${ip}:9998/pair?token=$(get /opt/openclaw/.env OPENCLAW_GATEWAY_TOKEN)"
     echo "    Mgmt API    : http://${ip}:9998   (Authorization: Bearer <MGMT API key>)"
@@ -66,7 +89,7 @@ cmd_info() {
     d="$(get /opt/n8n/.env N8N_HOST)"
     local n8n_tls
     n8n_tls="$(grep -E '^[[:space:]]*tls ' /etc/vps-ai/caddy/sites/n8n.caddy 2>/dev/null | head -1 | xargs)"
-    echo "  [n8n]"
+    echo "  [n8n]$(is_disabled n8n && echo "  — DISABLED (vps-ai enable n8n)")"
     echo "    n8n         : https://${d:-<dang cai>}"
     echo "    SSL         : $([[ "$n8n_tls" == "tls internal" ]] && echo "tu ky (DNS chua tro khi cai — PATCH /api/n8n/change-domain sau khi tro DNS)" || echo "Let's Encrypt")"
     echo "    NocoDB      : https://${d:-<dang cai>}/nocodb/"
@@ -80,21 +103,22 @@ cmd_info() {
 
 cmd_status() {
   echo "  [chung]"
+  svc vps-ai-mgmt
   svc caddy
   svc fail2ban
   if has_app hermes; then
-    echo "  [hermes]"
+    echo "  [hermes]$(is_disabled hermes && echo "  — DISABLED")"
     for s in hermes-mgmt hermes-gateway hermes-dashboard hermes-rag; do
-      systemctl list-unit-files "${s}.service" &>/dev/null && svc "$s"
+      unit_exists "${s}.service" && svc "$s"
     done
   fi
   if has_app openclaw; then
-    echo "  [openclaw]"
+    echo "  [openclaw]$(is_disabled openclaw && echo "  — DISABLED")"
     svc openclaw
     svc openclaw-mgmt
   fi
   if has_app n8n; then
-    echo "  [n8n]"
+    echo "  [n8n]$(is_disabled n8n && echo "  — DISABLED")"
     svc n8n-agent
     svc docker
     if [[ -f /opt/n8n/docker-compose.yml ]]; then
@@ -105,7 +129,7 @@ cmd_status() {
 
 units_of() {
   case "$1" in
-    hermes)   echo "hermes-mgmt hermes-gateway hermes-dashboard $(systemctl list-unit-files hermes-rag.service &>/dev/null && echo hermes-rag)" ;;
+    hermes)   echo "hermes-mgmt hermes-gateway hermes-dashboard $(unit_exists hermes-rag.service && echo hermes-rag)" ;;
     openclaw) echo "openclaw openclaw-mgmt" ;;
     n8n)      echo "n8n-agent" ;;
     caddy)    echo "caddy" ;;
@@ -124,6 +148,7 @@ cmd_restart() {
   local units
   units="$(units_of "$target")"
   [[ -n "$units" ]] || { echo "App khong hop le: $target"; exit 1; }
+  if is_disabled "$target"; then echo "Bo qua ${target}: dang disabled (vps-ai enable ${target})"; return 0; fi
   # shellcheck disable=SC2086
   systemctl restart $units && echo "Da restart: $units"
   if [[ "$target" == "n8n" && -f /opt/n8n/docker-compose.yml ]]; then
@@ -140,9 +165,86 @@ cmd_logs() {
 }
 
 cmd_reload_caddy() {
+  local out
   /usr/local/sbin/vps-ai-caddy-env
-  ( set -a; . /run/vps-ai/caddy.env; caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ) || exit 1
+  # Log validate chi in ra khi loi (tranh lan output cua API bat/tat)
+  out="$( ( set -a; . /run/vps-ai/caddy.env; caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ) 2>&1 )" \
+    || { echo "$out" | tail -5 >&2; return 1; }
   systemctl restart caddy && echo "Caddy da restart"
+}
+
+# quiet <cmd...> — chay lenh, chi in output khi that bai
+quiet() {
+  local out
+  out="$("$@" 2>&1)" || { echo "$out" | tail -15 >&2; return 1; }
+}
+
+# Toan bo unit can tat de app khong tu chay lai sau reboot. hermes.target Wants=
+# cac service Hermes nen phai disable ca target.
+app_units_all() {
+  local u
+  case "$1" in
+    hermes)
+      echo "hermes.target hermes-gateway.service hermes-dashboard.service hermes-mgmt.service"
+      for u in hermes-rag.service hermes-openviking.service; do unit_exists "$u" && echo "$u"; done ;;
+    openclaw) echo "openclaw.service openclaw-mgmt.service" ;;
+    n8n)      echo "n8n-agent.service n8n-agent-update.timer" ;;
+  esac
+}
+
+require_app() {
+  local app="${1:-}"
+  case "$app" in hermes|n8n|openclaw) ;; *) echo "App khong hop le: '${app}' (hermes | n8n | openclaw)" >&2; exit 2 ;; esac
+  has_app "$app" || { echo "App '${app}' chua duoc cai tren VPS nay" >&2; exit 3; }
+}
+
+cmd_disable() {
+  local app="${1:-}" units
+  require_app "$app"
+  # shellcheck disable=SC2046
+  units="$(app_units_all "$app" | xargs)"
+  echo "Disable ${app}: ${units}"
+  # shellcheck disable=SC2086
+  systemctl disable --now $units >/dev/null 2>&1 || true
+  # Gateway Hermes thoat ma != 0 khi nhan SIGTERM -> xoa trang thai "failed"
+  # shellcheck disable=SC2086
+  systemctl reset-failed $units >/dev/null 2>&1 || true
+  if [[ "$app" == "n8n" && -f /opt/n8n/docker-compose.yml ]]; then
+    # down (khong -v): xoa container, GIU volume du lieu. Khong dung `stop` vi
+    # nocodb co restart: always se tu chay lai khi docker khoi dong lai.
+    quiet docker compose -f /opt/n8n/docker-compose.yml down || { echo "LOI: docker compose down that bai" >&2; exit 1; }
+  fi
+  mkdir -p "$SITES_OFF_DIR"
+  [[ -f "${SITES_DIR}/${app}.caddy" ]] && mv -f "${SITES_DIR}/${app}.caddy" "${SITES_OFF_DIR}/${app}.caddy"
+  is_disabled "$app" || set_env_key DISABLED_APPS "$(echo "$(disabled_apps) $app" | xargs | tr ' ' ',')"
+  cmd_reload_caddy >/dev/null || echo "WARN: reload Caddy loi — vps-ai reload-caddy" >&2
+  echo "Da disable ${app} (du lieu giu nguyen; bat lai: vps-ai enable ${app})"
+}
+
+cmd_enable() {
+  local app="${1:-}" units
+  require_app "$app"
+  units="$(app_units_all "$app" | xargs)"
+  echo "Enable ${app}: ${units}"
+  if [[ "$app" == "n8n" && -f /opt/n8n/docker-compose.yml ]]; then
+    systemctl start docker
+    quiet docker compose -f /opt/n8n/docker-compose.yml up -d || { echo "LOI: docker compose up that bai" >&2; exit 1; }
+  fi
+  # shellcheck disable=SC2086
+  systemctl enable $units >/dev/null 2>&1
+  # shellcheck disable=SC2086
+  systemctl start $units || { echo "LOI: start ${units} that bai — journalctl -u ..." >&2; exit 1; }
+  [[ -f "${SITES_OFF_DIR}/${app}.caddy" ]] && mv -f "${SITES_OFF_DIR}/${app}.caddy" "${SITES_DIR}/${app}.caddy"
+  set_env_key DISABLED_APPS "$(disabled_apps | tr ' ' '\n' | grep -vx "$app" | xargs | tr ' ' ',')"
+  cmd_reload_caddy >/dev/null || echo "WARN: reload Caddy loi — vps-ai reload-caddy" >&2
+  echo "Da enable ${app}"
+}
+
+cmd_apps() {
+  local a
+  for a in $(apps); do
+    printf "  %-10s %s\n" "$a" "$(is_disabled "$a" && echo disabled || echo enabled)"
+  done
 }
 
 cmd_add() {
@@ -157,8 +259,11 @@ case "${1:-info}" in
   status)        cmd_status ;;
   restart)       shift; cmd_restart "$@" ;;
   logs)          shift; cmd_logs "$@" ;;
-  reload-caddy)  cmd_reload_caddy ;;
+  reload-caddy)  cmd_reload_caddy || exit 1 ;;
   add)           shift; cmd_add "$@" ;;
-  -h|--help|help) sed -n '3,10p' "$0" | sed 's/^# \{0,1\}//' ;;
+  disable)       shift; cmd_disable "$@" ;;
+  enable)        shift; cmd_enable "$@" ;;
+  apps)          cmd_apps ;;
+  -h|--help|help) sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)             echo "Lenh khong ro: $1 (xem: vps-ai help)"; exit 1 ;;
 esac
