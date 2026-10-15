@@ -1,5 +1,5 @@
 diff --git a/src/n8n/n8n.service.ts b/src/n8n/n8n.service.ts
-index a88ed83..879b9ae 100644
+index a88ed83..5eca2d8 100644
 --- a/src/n8n/n8n.service.ts
 +++ b/src/n8n/n8n.service.ts
 @@ -422,7 +422,7 @@ services:
@@ -11,13 +11,15 @@ index a88ed83..879b9ae 100644
      environment:
        NC_DB_TYPE: "pg"
        NC_DATABASE: \${POSTGRES_DB}
-@@ -865,7 +865,61 @@ REDIS_PASSWORD=${randomBytes(24).toString('hex')}`;
+@@ -865,7 +865,86 @@ REDIS_PASSWORD=${randomBytes(24).toString('hex')}`;
      }
    }
  
 +  // PROXY_MODE=caddy: VPS dung chung 1 Caddy voi cac app khac (vps-ai-management).
 +  // Agent chi ghi site file vao CADDY_SITES_DIR va reload Caddy; Caddy tu cap +
-+  // gia han Let's Encrypt (tu retry khi DNS chua tro). Mac dinh: nginx + certbot.
++  // gia han Let's Encrypt. DNS chua tro ve VPS -> chung chi tu ky (tls internal)
++  // de khong xin cert lien tuc (NXDOMAIN, rate limit); doi domain / reinstall sau
++  // khi tro DNS se chuyen sang Let's Encrypt. Mac dinh: nginx + certbot.
 +  private isCaddyMode(): boolean {
 +    return (process.env.PROXY_MODE || 'nginx').toLowerCase() === 'caddy';
 +  }
@@ -27,10 +29,25 @@ index a88ed83..879b9ae 100644
 +    return path.join(dir, 'n8n.caddy');
 +  }
 +
-+  private createCaddySite(domain: string, email: string): string {
++  // A record cua domain (qua 1.1.1.1) co trung IP cua VPS khong
++  private async dnsPointsHere(domain: string): Promise<boolean> {
++    try {
++      const { stdout: resolved } = await this.shellService.execute(
++        `dig +short A ${domain} @1.1.1.1 || true`,
++      );
++      const { stdout: local } = await this.shellService.execute('hostname -I || true');
++      const serverIps = new Set(local.split(/\s+/).filter(Boolean));
++      if (process.env.SERVER_IP) serverIps.add(process.env.SERVER_IP.trim());
++      return resolved.split(/\s+/).some((ip) => serverIps.has(ip));
++    } catch {
++      return false;
++    }
++  }
++
++  private createCaddySite(domain: string, tlsDirective: string): string {
 +    return `# Managed by n8n-agent (PROXY_MODE=caddy) — do not edit, rewritten on install/change-domain
 +${domain} {
-+    tls ${email}
++    ${tlsDirective}
 +
 +    request_body {
 +        max_size 100MB
@@ -62,10 +79,18 @@ index a88ed83..879b9ae 100644
 +  private async setupCaddy(domain: string, email: string) {
 +    const sitePath = this.caddySitePath();
 +    await fs.mkdir(path.dirname(sitePath), { recursive: true });
-+    await fs.writeFile(sitePath, this.createCaddySite(domain, email));
-+    this.logger.log(`Caddy site file written at ${sitePath}`);
++    const dnsReady = await this.dnsPointsHere(domain);
++    const tlsDirective = dnsReady ? `tls ${email}` : 'tls internal';
++    await fs.writeFile(sitePath, this.createCaddySite(domain, tlsDirective));
++    this.logger.log(`Caddy site file written at ${sitePath} (${tlsDirective})`);
++    if (!dnsReady) {
++      this.logger.warn(
++        `DNS for ${domain} does not point to this server — using a self-signed certificate. ` +
++          `Point DNS here, then change domain / reinstall to switch to Let's Encrypt.`,
++      );
++    }
 +    await this.shellService.execute('systemctl reload caddy || systemctl restart caddy');
-+    this.logger.log('Caddy reloaded; certificate is provisioned automatically.');
++    this.logger.log('Caddy reloaded.');
 +  }
 +
    private async setupNginxAndSSL(domain: string, email: string) {
@@ -73,7 +98,7 @@ index a88ed83..879b9ae 100644
      // 1. Cau hinh nginx phuc vu HTTP (port 80) truoc — n8n truy cap duoc ngay
      //    ke ca khi SSL chua cap xong.
      const nginxConfigContent = this.createNginxConfig(domain);
-@@ -923,6 +977,18 @@ REDIS_PASSWORD=${randomBytes(24).toString('hex')}`;
+@@ -923,6 +1002,18 @@ REDIS_PASSWORD=${randomBytes(24).toString('hex')}`;
    }
  
    private async cleanupNginxAndSSL(domain: string) {

@@ -4,7 +4,7 @@
 # postgres, redis, nocodb) qua POST /api/n8n/install cua agent.
 # Port tu tinovn/n8n-manage/install-server.sh. Khac biet so voi ban goc:
 #   - Khong cai Nginx/Certbot: agent chay PROXY_MODE=caddy, ghi site file vao
-#     /etc/vps-ai/caddy/sites/n8n.caddy (patches/n8n-manage-caddy.patch neu
+#     /etc/vps-ai/caddy/sites/n8n.caddy (DNS chua tro -> tls internal) (patches/n8n-manage-caddy.patch neu
 #     upstream chua ho tro)
 #   - update-agent.sh rieng: ap lai patch sau git pull, KHONG chay upgrade.sh
 #     cua upstream (script do clone lai repo goc va ha Node ve 20)
@@ -56,10 +56,13 @@ n8n_disable_nginx() {
   fi
 }
 
+# Dau hieu ban patch hien tai (PROXY_MODE=caddy + fallback tls internal khi DNS chua tro)
+readonly N8N_PATCH_MARKER="dnsPointsHere"
+
 # Dam bao source agent ho tro PROXY_MODE=caddy (no-op khi upstream da merge)
 n8n_ensure_caddy_support() {
   local dir="$1"
-  if grep -q "PROXY_MODE" "${dir}/src/n8n/n8n.service.ts"; then
+  if grep -q "$N8N_PATCH_MARKER" "${dir}/src/n8n/n8n.service.ts"; then
     return 0
   fi
   log "Ap patch Caddy cho n8n-agent"
@@ -102,6 +105,8 @@ n8n_install_agent() {
   upsert_env "$N8N_AGENT_ENV" AGENT_API_KEY "$MGMT_API_KEY"
   upsert_env "$N8N_AGENT_ENV" ALLOWED_IP_RANGES "$ips"
   upsert_env "$N8N_AGENT_ENV" PROXY_MODE caddy
+  # Agent so A record voi IP nay de chon Let's Encrypt hay chung chi tu ky
+  upsert_env "$N8N_AGENT_ENV" SERVER_IP "$SERVER_IP"
   upsert_env "$N8N_AGENT_ENV" CADDY_SITES_DIR "$CADDY_SITES_DIR"
 }
 
@@ -139,7 +144,7 @@ target="\$(git rev-parse "origin/\${REF}" 2>/dev/null || git rev-parse "\${REF}"
 if [[ "\$target" == "\$prev" ]]; then echo "n8n-agent da moi nhat (\${prev:0:8})"; exit 0; fi
 git reset --hard --quiet "\$target"
 rm -f upgrade.sh
-grep -q PROXY_MODE src/n8n/n8n.service.ts || git apply --3way "\$PATCH" || git apply "\$PATCH" || {
+grep -q ${N8N_PATCH_MARKER} src/n8n/n8n.service.ts || git apply --3way "\$PATCH" || git apply "\$PATCH" || {
   echo "Patch Caddy khong ap duoc len \${target:0:8} — quay lai \${prev:0:8}"
   git reset --hard --quiet "\$prev"; git apply "\$PATCH" 2>/dev/null; exit 1; }
 if npm install --no-audit --no-fund --loglevel=error && npm run build; then
@@ -148,7 +153,7 @@ if npm install --no-audit --no-fund --loglevel=error && npm run build; then
 else
   echo "Build loi — quay lai \${prev:0:8}"
   git reset --hard --quiet "\$prev"
-  grep -q PROXY_MODE src/n8n/n8n.service.ts || git apply "\$PATCH"
+  grep -q ${N8N_PATCH_MARKER} src/n8n/n8n.service.ts || git apply "\$PATCH"
   npm install --no-audit --no-fund --loglevel=error && npm run build
   systemctl restart n8n-agent
   exit 1
@@ -195,13 +200,18 @@ n8n_prepull_images() {
   done
 }
 
-# Ghi site Caddy truc tiep — dung khi n8n da duoc cai tu truoc (ban nginx cu)
+# Ghi site Caddy truc tiep — dung khi n8n da duoc cai tu truoc (ban nginx cu).
+# Cung logic voi agent: DNS chua tro -> chung chi tu ky, khong xin Let's Encrypt.
 n8n_write_site() {
-  local domain="$1"
+  local domain="$1" tls_directive="tls ${ACME_EMAIL}"
+  if ! dns_points_here "$domain" 3; then
+    tls_directive="tls internal"
+    log "WARN: DNS ${domain} chua tro ve ${SERVER_IP} — n8n dung chung chi tu ky"
+  fi
   cat > "${CADDY_SITES_DIR}/n8n.caddy" <<EOF
 # Managed by n8n-agent (PROXY_MODE=caddy) — do not edit, rewritten on install/change-domain
 ${domain} {
-    tls ${ACME_EMAIL}
+    ${tls_directive}
 
     request_body {
         max_size 100MB
@@ -240,7 +250,7 @@ n8n_install_instance() {
   fi
 
   dns_points_here "$N8N_DOMAIN" 3 \
-    || log "LUU Y: DNS ${N8N_DOMAIN} chua tro ve ${SERVER_IP} — van cai; Caddy tu cap SSL khi DNS dung"
+    || log "LUU Y: DNS ${N8N_DOMAIN} chua tro ve ${SERVER_IP} — n8n dung chung chi tu ky; tro DNS roi goi PATCH /api/n8n/change-domain de len Let's Encrypt"
 
   log "Goi n8n-agent: POST /api/n8n/install (domain=${N8N_DOMAIN})"
   local resp task_id status="" i

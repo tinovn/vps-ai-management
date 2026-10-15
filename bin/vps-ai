@@ -64,8 +64,11 @@ cmd_info() {
   if has_app n8n; then
     local d
     d="$(get /opt/n8n/.env N8N_HOST)"
+    local n8n_tls
+    n8n_tls="$(grep -E '^[[:space:]]*tls ' /etc/vps-ai/caddy/sites/n8n.caddy 2>/dev/null | head -1 | xargs)"
     echo "  [n8n]"
     echo "    n8n         : https://${d:-<dang cai>}"
+    echo "    SSL         : $([[ "$n8n_tls" == "tls internal" ]] && echo "tu ky (DNS chua tro khi cai — PATCH /api/n8n/change-domain sau khi tro DNS)" || echo "Let's Encrypt")"
     echo "    NocoDB      : https://${d:-<dang cai>}/nocodb/"
     echo "    Agent API   : http://${ip}:7071   (header tng-api-key: <MGMT API key>, IP whitelist)"
     echo ""

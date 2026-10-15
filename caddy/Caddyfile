@@ -3,6 +3,9 @@
 # /usr/local/sbin/vps-ai-caddy-env sinh tu .env cua tung app truoc moi start/reload.
 {
     email {$ACME_EMAIL}
+    # Caddy chay bang user caddy (khong co sudo): khong cai CA noi bo vao trust
+    # store khi dung `tls internal`, tranh loi "user NOT in sudoers" lap lai.
+    skip_install_trust
 }
 
 import /etc/vps-ai/caddy/sites/*.caddy

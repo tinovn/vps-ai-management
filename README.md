@@ -48,9 +48,13 @@ ssh root@vps "curl -fsSL https://raw.githubusercontent.com/tinovn/vps-ai-managem
 
 Trỏ A record của từng tên miền (hoặc wildcard `*.<TEN_MIEN>`) về IP VPS **trước khi cài** để có Let's Encrypt ngay. Khi cài thêm app sau này, app cũ giữ nguyên tên miền đang dùng.
 
-Nếu DNS chưa trỏ lúc cài:
-- **Hermes / OpenClaw** dùng chứng chỉ tự ký (như bản gốc) — trỏ DNS xong thì đổi domain qua management API.
-- **n8n**: Caddy tự thử cấp lại chứng chỉ, có hiệu lực ngay khi DNS đúng.
+Nếu DNS chưa trỏ lúc cài, cả 3 app dùng **chứng chỉ tự ký** (`tls internal`) để HTTPS vẫn vào được (trình duyệt cảnh báo), Caddy không xin Let's Encrypt/ZeroSSL liên tục nên không lo dính rate limit khi cài lại nhiều lần. Trỏ DNS xong thì đổi domain qua management API để lên Let's Encrypt:
+
+| App | Endpoint |
+|---|---|
+| Hermes | `PUT :9997/api/domain` |
+| OpenClaw | `PUT :9998/api/domain` |
+| n8n | `PATCH :7071/api/n8n/change-domain` (gọi lại với chính domain đó cũng được) |
 
 ## Sau khi cài
 
@@ -93,7 +97,8 @@ Ba repo gốc xung đột nhau ở mấy chỗ, bộ này xử lý như sau:
 |---|---|
 | Hermes & OpenClaw cùng ghi đè `caddy.service.d/override.conf` trỏ tới Caddyfile riêng | 1 Caddyfile chung `import /etc/vps-ai/caddy/sites/*.caddy`, mỗi app 1 site file |
 | Cả hai dùng biến `DOMAIN`/`CADDY_TLS` trong `.env` riêng (mgmt API sửa trực tiếp) | `vps-ai-caddy-env` đọc từng `.env`, thêm prefix (`HERMES_DOMAIN`, `OPENCLAW_DOMAIN`…) trước mỗi lần Caddy start/reload — mgmt API đổi domain + `systemctl restart caddy` vẫn hoạt động như cũ |
-| n8n dùng Nginx + Certbot trên 80/443 | n8n-agent chạy `PROXY_MODE=caddy`: ghi `sites/n8n.caddy` và reload Caddy ([patches/n8n-manage-caddy.patch](patches/n8n-manage-caddy.patch)) |
+| n8n dùng Nginx + Certbot trên 80/443 | n8n-agent chạy `PROXY_MODE=caddy`: ghi `sites/n8n.caddy` (DNS chưa trỏ → `tls internal`) và reload Caddy ([patches/n8n-manage-caddy.patch](patches/n8n-manage-caddy.patch)) |
+| Caddy gọi `sudo` để cài CA nội bộ vào trust store khi dùng cert tự ký (user `caddy` không có sudo → journal đầy lỗi) | `skip_install_trust` trong global options |
 | Hermes RAG và OpenClaw mgmt cùng cổng 9998 | RAG chuyển sang 9996 (`RAG_PORT` trong `/opt/hermes/.env`) |
 | Node 22 (Hermes) / 24 (OpenClaw) / 20 (n8n) | Cài Node 24 một lần, không hạ cấp |
 | `update-agent.sh` của n8n chạy `upgrade.sh` upstream mỗi lần boot (clone lại repo gốc, hạ Node về 20) | `update-agent.sh` riêng: pull, áp lại patch, build lỗi thì quay về bản cũ, không chạy `upgrade.sh` |
@@ -129,7 +134,15 @@ patches/n8n-manage-caddy.patch
 
 - Ubuntu 24.04 (Hermes bắt buộc 24.04; n8n/OpenClaw chạy được trên 22.04)
 - Chạy bằng root
-- Tài nguyên khuyến nghị: Hermes ~1.5GB RAM / 6GB disk, n8n ~1.5GB / 6GB, OpenClaw ~1GB / 4GB. Cài cả 3 nên có **≥ 4GB RAM** — installer tự thêm swap 4GB nếu chưa có.
+- RAM khuyến nghị (đo thực tế, đã tính phần dùng sau khi cài):
+
+  | Số app | RAM khuyến nghị | Disk trống |
+  |---|---|---|
+  | 1 app | **tối thiểu 4GB** | 8GB (OpenClaw 6GB) |
+  | 2 app | 6GB | ~14GB |
+  | 3 app | 8GB | ~18GB |
+
+  VPS 2GB vẫn cài được (installer cảnh báo và tự tạo swap 4GB) nhưng sau cài chỉ còn ~300–400MB trống, app chạy chậm — không khuyến nghị dùng thật.
 - Google Chrome cho OpenClaw chỉ có bản amd64; trên arm64 browser tool của OpenClaw sẽ không dùng được.
 
 ## Ghi chú

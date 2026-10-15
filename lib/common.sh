@@ -69,18 +69,22 @@ preflight_checks() {
   fi
   log "OS: ${PRETTY_NAME} ($(dpkg --print-architecture))"
 
-  local need_disk=2 need_ram=1024 disk ram
-  [[ "${WANT_HERMES:-false}" == "true" ]]   && need_disk=$((need_disk + 6)) && need_ram=$((need_ram + 1536))
-  [[ "${WANT_N8N:-false}" == "true" ]]      && need_disk=$((need_disk + 6)) && need_ram=$((need_ram + 1536))
-  [[ "${WANT_OPENCLAW:-false}" == "true" ]] && need_disk=$((need_disk + 4)) && need_ram=$((need_ram + 1024))
+  # RAM khuyen nghi: toi thieu 4GB ke ca 1 app (team test: 2GB + swap chay duoc
+  # nhung con 300-400MB trong sau cai, cham khi su dung); 2 app 6GB, 3 app 8GB.
+  local need_disk=2 apps=0 need_ram disk ram
+  [[ "${WANT_HERMES:-false}" == "true" ]]   && need_disk=$((need_disk + 6)) && apps=$((apps + 1))
+  [[ "${WANT_N8N:-false}" == "true" ]]      && need_disk=$((need_disk + 6)) && apps=$((apps + 1))
+  [[ "${WANT_OPENCLAW:-false}" == "true" ]] && need_disk=$((need_disk + 4)) && apps=$((apps + 1))
+  need_ram=$(( apps <= 1 ? 4096 : (apps == 2 ? 6144 : 8192) ))
   disk=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
   ram=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)
   MEM_TOTAL_MB="$ram"
-  log "Tai nguyen: disk trong=${disk}GB (can ~${need_disk}GB), RAM=${ram}MB (khuyen nghi ~${need_ram}MB)"
+  log "Tai nguyen: disk trong=${disk}GB (can ~${need_disk}GB), RAM=${ram}MB (khuyen nghi >= $((need_ram / 1024))GB cho ${apps} app)"
   [[ "${disk:-0}" -ge "$need_disk" ]] || die "Khong du dung luong dia: can >=${need_disk}GB, con ${disk}GB"
   [[ "${ram:-0}" -ge 900 ]] || die "Khong du RAM: can >=1GB, co ${ram}MB"
-  if [[ "$ram" -lt "$need_ram" ]]; then
-    log "CANH BAO: RAM ${ram}MB thap hon khuyen nghi ${need_ram}MB cho bo app da chon — se them swap, app co the cham"
+  # MemTotal thuong thap hon RAM danh dinh ~5% (kernel giu lai) -> so voi 92%
+  if [[ "$ram" -lt $(( need_ram * 92 / 100 )) ]]; then
+    log "CANH BAO: RAM ${ram}MB thap hon khuyen nghi $((need_ram / 1024))GB — se them swap 4GB; cai duoc nhung app se cham khi su dung"
   fi
 }
 
@@ -282,7 +286,8 @@ ensure_swap() {
     return 0
   fi
   local size="2G"
-  [[ "$(total_app_count)" -ge 2 ]] && size="4G"
+  # Nhieu app, hoac RAM < 4GB (team test: 2GB can swap 4GB moi cai on dinh)
+  if [[ "$(total_app_count)" -ge 2 || "${MEM_TOTAL_MB:-0}" -lt 3800 ]]; then size="4G"; fi
   log "Chua co swap -> tao /swapfile ${size} (chong OOM khi build Hermes / Docker image)"
   if fallocate -l "$size" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=$(( ${size%G} * 1024 )) status=none; then
     chmod 600 /swapfile
