@@ -72,6 +72,8 @@ vps-ai reload-caddy
 
 ### API bật/tắt app cho panel (`:9990`)
 
+Tài liệu đầy đủ cho panel: [docs/vps-ai-mgmt-api.md](docs/vps-ai-mgmt-api.md).
+
 Header: `Authorization: Bearer <MGMT_API_KEY>` (key dùng chung, `--mgmt-key` lúc cài).
 
 | Method | Path | Mô tả |
